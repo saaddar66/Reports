@@ -1,0 +1,347 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <template id="report_sales_invoice_custom_document">
+        <t t-call="web.basic_layout">
+
+            <!-- ═══════════════════════════════════════════════════
+                 PAGE-LEVEL CSS
+                 ═══════════════════════════════════════════════════ -->
+            <style>
+                @page {
+                    margin-top: 1.5cm;
+                    margin-bottom: 25mm;
+                    margin-left: 1.0cm;
+                    margin-right: 1.0cm;
+                }
+                .inv-page-footer {
+                    position: fixed !important;
+                    bottom: 0;
+                    left: 0;
+                    right: 0;
+                    width: 100%;
+                    font-family: Arial, sans-serif;
+                    font-size: 7pt;
+                    border-top: 1px solid #888;
+                    padding-top: 2px;
+                    background: white;
+                }
+                body, .inv-body {
+                    padding-bottom: 60px;
+                }
+                .inv-page-footer table {
+                    width: 100%;
+                    border: none;
+                }
+                .inv-page-footer td {
+                    border: none;
+                    padding: 0 4px;
+                }
+                .inv-body {
+                    font-family: Arial, sans-serif;
+                    font-size: 10pt;
+                    background-color: white;
+                    padding-bottom: 20mm;
+                }
+                .inv-table {
+                    border-collapse: collapse;
+                    width: 100%;
+                    font-size: 9pt;
+                    page-break-inside: auto;
+                }
+                .inv-table tr {
+                    page-break-inside: avoid !important;
+                }
+                .inv-table th,
+                .inv-table td {
+                    border: 1px solid black !important;
+                    padding: 3px 5px !important;
+                }
+                .inv-table thead {
+                    background-color: white !important; /* Changed from #d3d3d3 to white */
+                    display: table-header-group !important;
+                }
+                .inv-table thead th {
+                    border-bottom: 2px solid black !important;
+                    text-align: center !important; /* Forces center alignment */
+                    font-weight: bold !important;  /* Forces bold text */
+                }
+                .text-right { text-align: right; }
+                .text-center { text-align: center; }
+            </style>
+
+            <div class="inv-body">
+
+                <!-- ─── TITLE ──────────────────────────────────────── -->
+                <div class="text-center" style="margin-bottom: 16px;">
+                    <h2 style="font-size: 14pt; font-weight: bold; margin: 0;">SALES INVOICE</h2>
+                </div>
+
+                <!-- ─── INFO ROW: Invoice / Delivery Order / Sale Order ── -->
+                <div class="row" style="margin-bottom: 14px;">
+                    <div class="col-4">
+                        <strong>Invoice NO/Date:</strong><br/>
+                        <span t-field="o.name"/> /
+                        <span t-esc="o.invoice_date and o.invoice_date.strftime('%d-%b-%Y') or ''"/>
+                    </div>
+
+                    <div class="col-4 text-center">
+                        <t t-set="delivery_orders"
+                           t-value="o.invoice_line_ids.mapped('sale_line_ids').mapped('order_id').mapped('picking_ids').filtered(lambda p: p.state != 'cancel')"/>
+                        <t t-set="do_names"
+                           t-value="', '.join(delivery_orders.mapped('name')) if delivery_orders else ''"/>
+                        <t t-set="do_dates"
+                           t-value="', '.join([(p.date_done or p.scheduled_date).strftime('%d-%b-%Y') for p in delivery_orders if (p.date_done or p.scheduled_date)]) if delivery_orders else ''"/>
+                        <strong>Delivery Order NO/Date:</strong><br/>
+                        <span t-esc="do_names"/> /
+                        <span t-esc="do_dates"/>
+                    </div>
+
+                    <div class="col-4 text-end">
+                        <t t-set="sale_orders"
+                           t-value="o.invoice_line_ids.mapped('sale_line_ids').mapped('order_id')"/>
+                        <t t-set="so_names"
+                           t-value="', '.join(sale_orders.mapped('name')) if sale_orders else ''"/>
+                        <t t-set="so_dates"
+                           t-value="', '.join([s.date_order.strftime('%d-%b-%Y') for s in sale_orders if s.date_order]) if sale_orders else ''"/>
+                        <strong>Sale Order NO/Date:</strong><br/>
+                        <span t-esc="so_names"/> /
+                        <span t-esc="so_dates"/>
+                    </div>
+                </div>
+
+                <!-- ─── ADDRESSES (Bill To / Ship To) ──────────────── -->
+                <div class="row" style="margin-bottom: 14px;">
+                    <div class="col-6">
+                        <strong>Bill To:</strong>
+                        <span t-field="o.partner_id.id"/> /
+                        <span t-field="o.partner_id.name"/><br/>
+                        <strong>Address:</strong>
+                        <span t-field="o.partner_id.street"/><br/>
+                        <strong>City:</strong>
+                        <span t-field="o.partner_id.city"/> -
+                        <span t-field="o.partner_id.state_id.name"/>,
+                        <span t-field="o.partner_id.country_id.name"/><br/>
+                        <strong>Cell:</strong>
+                        <span t-field="o.partner_id.phone"/>
+                    </div>
+                    <div class="col-6">
+                        <t t-set="shipping" t-value="o.partner_shipping_id or o.partner_id"/>
+                        <strong>Ship To:</strong>
+                        <span t-esc="shipping.id"/> /
+                        <span t-esc="shipping.name"/><br/>
+                        <strong>Address:</strong>
+                        <span t-esc="shipping.street"/><br/>
+                        <strong>City:</strong>
+                        <span t-esc="shipping.city"/> -
+                        <span t-esc="shipping.state_id.name"/>,
+                        <span t-esc="shipping.country_id.name"/><br/>
+                        <strong>Cell:</strong>
+                        <span t-esc="shipping.phone"/>
+                    </div>
+                </div>
+
+                <!-- ─── LINE ITEMS TABLE ────────────────────────────── -->
+                <!--
+                    Accumulators:
+                      s_no        : sequential counter (zero-padded to 4 digits)
+                      total_qty   : sum of line quantities
+                      grand_total : sum of (unit_after_disc * qty) — single source of truth
+                                    for both the "Total" row and the "Grand Total" row.
+                                    Uses discount_amount (SAP absolute) not price_subtotal,
+                                    so both rows are always consistent with each other and
+                                    with the per-line "Total Value" column.
+                -->
+                <t t-set="s_no"        t-value="0"/>
+                <t t-set="total_qty"   t-value="0.0"/>
+                <t t-set="grand_total" t-value="0.0"/>
+
+                <table class="inv-table">
+                    <thead>
+                        <tr>
+                            <th class="text-center" style="width: 4%;">S.NO.</th>
+                            <th class="text-center" style="width: 26%;">Description</th>
+                            <th class="text-center" style="width: 10%;">Quantity</th>
+                            <th class="text-center" style="width: 6%;">UoM</th>
+                            <th class="text-center" style="width: 11%;">Unit Price</th>
+                            <th class="text-center" style="width: 11%;">Trade Disc.</th>
+                            <th class="text-center" style="width: 11%;">Unit Price after Trade Disc</th>
+                            <th class="text-center" style="width: 14%;">Total Value</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <!-- Only product lines (no section/note/Odoo-GL rows) -->
+                        <t t-foreach="o.invoice_line_ids.filtered(lambda l: l.display_type not in ('line_section', 'line_note') and not (l.name and '[Odoo]' in l.name))" t-as="line">
+
+                            <t t-set="s_no" t-value="s_no + 1"/>
+
+                            <!--
+                                FIX 1 – Trade Disc (absolute PKR per unit).
+                                SAP engine writes the absolute discount to line.discount_amount.
+                                line.discount (%) is Odoo's native field and is NOT populated
+                                by the SAP engine, so it would always be 0 without this fix.
+                                Fall back to the % calculation for non-SAP invoices.
+                            -->
+                            <t t-set="trade_disc"
+                               t-value="line.discount_amount if line.discount_amount else (line.price_unit * (line.discount / 100.0) if line.discount else 0.0)"/>
+
+                            <!--
+                                FIX 2 – Unit Price after Trade Disc (net pre-tax unit price).
+                                Subtract absolute discount_amount when present; otherwise use
+                                the standard percentage formula.
+                            -->
+                            <t t-set="unit_after_disc"
+                               t-value="(line.price_unit - line.discount_amount) if line.discount_amount else (line.price_unit * (1.0 - line.discount / 100.0) if line.discount else line.price_unit)"/>
+
+                            <!--
+                                FIX 3 – Per-line Total Value = unit_after_disc * qty.
+                                This is the value shown in the last column and accumulated
+                                into grand_total. Using price_subtotal here would diverge from
+                                unit_after_disc because price_subtotal is computed from
+                                Odoo's native discount % (which SAP does not populate).
+                            -->
+                            <t t-set="line_total" t-value="unit_after_disc * line.quantity"/>
+
+                            <!-- Accumulate -->
+                            <t t-set="total_qty"   t-value="total_qty   + line.quantity"/>
+                            <t t-set="grand_total" t-value="grand_total + line_total"/>
+
+                            <tr>
+                                <td>
+                                    <span t-esc="'%02d' % s_no"/>
+                                </td>
+                                <td>
+                                    <t t-if="line.product_id.default_code">
+                                        <span t-esc="line.product_id.default_code"/>/<span t-esc="line.product_id.name"/>
+                                    </t>
+                                    <t t-else="">
+                                        <span t-esc="line.product_id.name or line.name or ''"/>
+                                    </t>
+                                </td>
+                                <td class="text-right">
+                                    <span t-esc="'{:.3f}'.format(line.quantity)"/>
+                                </td>
+                                <td>
+                                    <span t-esc="line.product_uom_id.name if line.product_uom_id else ''"/>
+                                </td>
+                                <!-- Unit Price (MRP / base price as set by SAP engine) -->
+                                <td class="text-right">
+                                    <span t-esc="'{:.4f}'.format(line.price_unit)"/>
+                                </td>
+                                <!-- Trade Disc: absolute PKR amount per unit -->
+                                <td class="text-right">
+                                    <span t-esc="'{:.4f}'.format(trade_disc)"/>
+                                </td>
+                                <!-- Net unit price after discount -->
+                                <td class="text-right">
+                                    <span t-esc="'{:.4f}'.format(unit_after_disc)"/>
+                                </td>
+                                <!-- Line total = unit_after_disc * qty -->
+                                <td class="text-right">
+                                    <span t-esc="'{:,.2f}'.format(line_total)"/>
+                                </td>
+                            </tr>
+                        </t>
+
+                        <!-- FORCE SEPARATOR -->
+                        <tr>
+                            <td colspan="8" style="border: none; height: 10px;"></td>
+                        </tr>
+
+                        <!--
+                            FIX 3 (continued) – Total row now uses grand_total,
+                            which is the same accumulator used by Grand Total below.
+                            Previously total_val used price_subtotal (Odoo native),
+                            causing Total ≠ Grand Total on SAP invoices.
+                        -->
+                        <tr>
+                            <td colspan="2" class="text-right">
+                                <strong>Total</strong>
+                            </td>
+                            <td class="text-right">
+                                <strong>
+                                    <span t-esc="'{:.3f}'.format(total_qty)"/>
+                                </strong>
+                            </td>
+                            <td colspan="4"></td>
+                            <td class="text-right">
+                                <strong>
+                                    <span t-esc="'{:,.2f}'.format(grand_total)"/>
+                                </strong>
+                            </td>
+                        </tr>
+
+                        <!-- Grand Total = same value as Total (net of discounts, pre-tax) -->
+                        <tr>
+                            <td colspan="7" class="text-right">
+                                <strong>Grand Total:</strong>
+                            </td>
+                            <td class="text-right">
+                                <strong>
+                                    <span t-esc="'{:,.2f}'.format(grand_total)"/>
+                                </strong>
+                            </td>
+                        </tr>
+
+                        <!--
+                            NOTE: amount_total_words_pkr must be computed in Python
+                            from the same grand_total figure (net pre-tax).
+                            Verify that its Python definition reads from the correct base —
+                            if it currently uses o.amount_total or o.amount_untaxed it will
+                            show a different figure than grand_total printed above.
+                        -->
+                        <tr>
+                            <td colspan="8">
+                                <strong>Amount in Words: </strong>
+                                 <!-- <span t-esc="o.amount_total_words_pkr"/>coming from SAP schema --> 
+                                 <span t-esc="o.company_id.currency_id.amount_to_text(grand_total)" />
+                            </td>
+                        </tr>
+
+                        <tr>
+                            <td colspan="8" style="height: 50px;">
+                                <strong>Remarks:</strong>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+
+            </div>
+        </t>
+    </template>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         OUTER WRAPPER — iterates docs, injects fixed footer per page
+         ═══════════════════════════════════════════════════════════════ -->
+            <template id="report_sales_invoice_custom">
+        <t t-call="web.html_container">
+            <div class="footer" style="width:100%; font-family: DejaVu Sans, Liberation Sans, sans-serif; font-size: 10px; padding-bottom:10px;">
+
+                <div class="text-center" style="padding-bottom:10px;">
+                    "This is a system generated Invoice and does not require any signature"<br/>
+                    Plot No: H 23/3 Shed No 1-5, Landhi Industrial Area, Bin Qasim Town, Karachi<br/>
+                    NTN: 7246587-3, GST: 32-77-8761-285-13, Tel: 9221-35130303, info_sales@anabatla.com
+                </div>
+
+                <div class="row" style="border-top: 1px solid #bbb; padding-top: 5px; font-size: 9px;">
+                    <div class="col-3">
+                        User ID: <span t-esc="env.user.login"/>
+                    </div>
+                    <div class="col-3" style="text-align: center;">
+                        Date: <span t-esc="context_timestamp(datetime.datetime.now()).strftime('%d-%b-%Y')"/>
+                    </div>
+                    <div class="col-3" style="text-align: center;">
+                        Time: <span t-esc="context_timestamp(datetime.datetime.now()).strftime('%H:%M:%S')"/>
+                    </div>
+                    <div class="col-3" style="text-align: right;">
+                        Page <span class="page"/> of <span class="topage"/>
+                    </div>
+                </div>
+
+            </div>
+            <!--
+            <t t-foreach="docs" t-as="o">
+                <t t-call="customer_invoice.report_customer_invoice_custom_document"/>
+            </t> !-->
+        </t>
+    </template>
+</odoo>
